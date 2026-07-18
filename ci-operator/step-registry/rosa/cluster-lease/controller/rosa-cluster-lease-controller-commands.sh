@@ -423,8 +423,32 @@ for i in $(seq 0 $((ACTUAL_COUNT - 1))); do
         continue
     fi
 
-    # Skip health checks for in-use and provisioning clusters
-    if [[ "${STATUS}" == "in-use" || "${STATUS}" == "provisioning" ]]; then
+    # Skip health checks for in-use clusters
+    if [[ "${STATUS}" == "in-use" ]]; then
+        HEALTHY=$((HEALTHY + 1))
+        continue
+    fi
+
+    # Verify provisioning clusters still exist in OCM
+    if [[ "${STATUS}" == "provisioning" ]]; then
+        CLUSTER_OCM_ENV=$(echo "${CM}" | jq -r '.data["ocm-env"] // "staging"')
+        ocm_ensure_env "${CLUSTER_OCM_ENV}"
+        OCM_RESPONSE=$(ocm describe cluster "${CLUSTER_ID}" --json 2>/dev/null || echo "")
+        if [[ -z "${OCM_RESPONSE}" ]]; then
+            log "WARNING: ${CM_NAME} OCM unreachable, skipping provisioning check"
+            HEALTHY=$((HEALTHY + 1))
+            continue
+        fi
+        OCM_ID=$(echo "${OCM_RESPONSE}" | jq -r '.id // ""' 2>/dev/null || true)
+        if [[ -z "${OCM_ID}" || "${OCM_ID}" == "404" ]]; then
+            log "STALE PROVISIONING: ${CM_NAME} no longer exists in OCM, removing ConfigMap"
+            if ! dry_run_guard "Would delete stale provisioning ConfigMap ${CM_NAME}"; then
+                lease_oc delete configmap "${CM_NAME}" -n "${LEASE_NAMESPACE}" || true
+            fi
+            UNHEALTHY=$((UNHEALTHY + 1))
+            echo "STALE PROVISIONING: ${CM_NAME} (removed, will reprovision next run)" >> "${REPORT}"
+            continue
+        fi
         HEALTHY=$((HEALTHY + 1))
         continue
     fi
